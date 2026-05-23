@@ -196,22 +196,37 @@ export default function GastroRef() {
 
   const GEMINI_MODEL = "gemini-2.5-flash";
 
-  const geminiCall = async (systemInstruction, contents, maxTokens = 1500) => {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: systemInstruction }] },
-          contents,
-          generationConfig: { maxOutputTokens: maxTokens }
-        })
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+  const geminiCall = async (systemInstruction, contents, maxTokens = 1500, retries = 3) => {
+    for (let attempt = 0; attempt < retries; attempt++) {
+      try {
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              systemInstruction: { parts: [{ text: systemInstruction }] },
+              contents,
+              generationConfig: { maxOutputTokens: maxTokens }
+            })
+          }
+        );
+        if (res.status === 503 || res.status === 429) {
+          const wait = (attempt + 1) * 8000;
+          await sleep(wait);
+          continue;
+        }
+        const data = await res.json();
+        if (data.error) throw new Error(data.error.message);
+        return data.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("") || "";
+      } catch (err) {
+        if (attempt === retries - 1) throw err;
+        await sleep((attempt + 1) * 5000);
       }
-    );
-    const data = await res.json();
-    if (data.error) throw new Error(data.error.message);
-    return data.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("") || "";
+    }
+    throw new Error("Failed after retries");
   };
 
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
@@ -255,18 +270,14 @@ export default function GastroRef() {
     const files = Array.from(e.target.files);
     for (const file of files) {
       if (file.type !== "application/pdf") { notify("Only PDF files supported", "error"); continue; }
-      notify(`Processing ${file.name}...`, "info");
+      notify(`Extracting text from ${file.name}...`, "info");
       try {
         const rawText = await extractPdfText(file);
-        if (!rawText.trim()) throw new Error("No text extracted");
-        const extractedContent = await geminiCall(
-          "You are a medical document extractor. You will receive raw text extracted from a clinical guideline PDF. Clean it up and reformat it clearly with headings. Preserve ALL recommendations, drug doses, scoring systems, tables, and algorithms verbatim. Do not omit any clinical content.",
-          [{ role: "user", parts: [{ text: `Here is the raw extracted text from the PDF "${file.name}". Please clean and reformat it:\n\n${rawText.slice(0, 30000)}` }] }],
-          4000
-        );
-        setGuidelines(prev => [...prev.filter(g => g.name !== file.name), { name: file.name, content: extractedContent, addedAt: new Date().toLocaleString() }]);
-        notify(`✓ ${file.name} loaded`);
-      } catch (err) { notify(`Failed to process ${file.name}: ${err.message}`, "error"); }
+        if (!rawText.trim()) throw new Error("No text could be extracted — the PDF may be scanned/image-based");
+        const truncated = rawText.slice(0, 60000);
+        setGuidelines(prev => [...prev.filter(g => g.name !== file.name), { name: file.name, content: truncated, addedAt: new Date().toLocaleString() }]);
+        notify(`✓ ${file.name} loaded (${Math.round(truncated.length / 1000)}k chars)`);
+      } catch (err) { notify(`Failed: ${err.message}`, "error"); }
     }
     e.target.value = "";
   };
