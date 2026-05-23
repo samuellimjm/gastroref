@@ -194,7 +194,7 @@ export default function GastroRef() {
   const chatEndRef = useRef(null);
   const fileInputRef = useRef(null);
 
-  const GEMINI_MODEL = "gemini-2.5-flash-preview-05-20";
+  const GEMINI_MODEL = "gemini-2.5-flash";
 
   const geminiCall = async (systemInstruction, contents, maxTokens = 1500) => {
     const res = await fetch(
