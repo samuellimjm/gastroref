@@ -216,6 +216,14 @@ export default function GastroRef() {
 
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
 
+  useEffect(() => {
+    const script = document.createElement("script");
+    script.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+    script.async = true;
+    document.head.appendChild(script);
+    return () => { try { document.head.removeChild(script); } catch {} };
+  }, []);
+
   const notify = (msg, type = "success") => {
     setNotification({ msg, type });
     setTimeout(() => setNotification(null), 3000);
@@ -228,26 +236,37 @@ export default function GastroRef() {
   const systemPrompt = (mode === "exam" ? EXAM_SYSTEM : CLINIC_SYSTEM) + guidelinesContext;
 
   // PDF upload
+  const extractPdfText = async (file) => {
+    const pdfjsLib = window["pdfjs-dist/build/pdf"];
+    pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+    const arrayBuffer = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    let fullText = "";
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const textContent = await page.getTextContent();
+      const pageText = textContent.items.map(item => item.str).join(" ");
+      fullText += `\n--- Page ${i} ---\n${pageText}`;
+    }
+    return fullText;
+  };
+
   const handleFileUpload = async (e) => {
     const files = Array.from(e.target.files);
     for (const file of files) {
       if (file.type !== "application/pdf") { notify("Only PDF files supported", "error"); continue; }
-      const reader = new FileReader();
-      reader.onload = async (ev) => {
-        const base64 = ev.target.result.split(",")[1];
-        notify(`Processing ${file.name}...`, "info");
-        try {
-          const extractedContent = await geminiCall(
-            "You are a medical document extractor. Extract ALL clinical guideline content from the provided PDF. Preserve all recommendations, drug doses, scoring systems, tables, and algorithms verbatim. Format clearly with headings.",
-            [{ role: "user", parts: [{ inlineData: { mimeType: "application/pdf", data: base64 } }, { text: "Extract all clinical guideline content from this PDF." }] }],
-            4000
-          );
-          const content = extractedContent;
-          setGuidelines(prev => [...prev.filter(g => g.name !== file.name), { name: file.name, content, addedAt: new Date().toLocaleString() }]);
-          notify(`✓ ${file.name} loaded`);
-        } catch { notify(`Failed to process ${file.name}`, "error"); }
-      };
-      reader.readAsDataURL(file);
+      notify(`Processing ${file.name}...`, "info");
+      try {
+        const rawText = await extractPdfText(file);
+        if (!rawText.trim()) throw new Error("No text extracted");
+        const extractedContent = await geminiCall(
+          "You are a medical document extractor. You will receive raw text extracted from a clinical guideline PDF. Clean it up and reformat it clearly with headings. Preserve ALL recommendations, drug doses, scoring systems, tables, and algorithms verbatim. Do not omit any clinical content.",
+          [{ role: "user", parts: [{ text: `Here is the raw extracted text from the PDF "${file.name}". Please clean and reformat it:\n\n${rawText.slice(0, 30000)}` }] }],
+          4000
+        );
+        setGuidelines(prev => [...prev.filter(g => g.name !== file.name), { name: file.name, content: extractedContent, addedAt: new Date().toLocaleString() }]);
+        notify(`✓ ${file.name} loaded`);
+      } catch (err) { notify(`Failed to process ${file.name}: ${err.message}`, "error"); }
     }
     e.target.value = "";
   };
