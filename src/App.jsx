@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 
 // ── Firebase config — paste your values here after setup ─────────────────────
-const firebaseConfig = {
+const FIREBASE_CONFIG = {
   apiKey: "AIzaSyDzElmIppZS9XGkIPgXJ3CIGlHuC4wxVwI",
   authDomain: "gastroref-91b50.firebaseapp.com",
   projectId: "gastroref-91b50",
