@@ -1,5 +1,13 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 
+// ── Firebase config — paste your values here after setup ─────────────────────
+const firebaseConfig = {
+  apiKey: "AIzaSyDzElmIppZS9XGkIPgXJ3CIGlHuC4wxVwI",
+  authDomain: "gastroref-91b50.firebaseapp.com",
+  projectId: "gastroref-91b50",
+  storageBucket: "gastroref-91b50.firebasestorage.app",
+};
+
 // ── Palette & tokens ──────────────────────────────────────────────────────────
 const C = {
   bg: "#000000",
@@ -191,6 +199,9 @@ export default function GastroRef() {
   const [notification, setNotification] = useState(null);
   const [apiKey, setApiKey] = useState(() => { try { return localStorage.getItem("gastroref_gemini_key") || ""; } catch { return ""; } });
   const [apiKeyInput, setApiKeyInput] = useState("");
+  const [fbReady, setFbReady] = useState(false);
+  const [fbSyncing, setFbSyncing] = useState(false);
+  const dbRef = useRef(null);
   const chatEndRef = useRef(null);
   const fileInputRef = useRef(null);
 
@@ -232,11 +243,38 @@ export default function GastroRef() {
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
 
   useEffect(() => {
-    const script = document.createElement("script");
-    script.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
-    script.async = true;
-    document.head.appendChild(script);
-    return () => { try { document.head.removeChild(script); } catch {} };
+    // Load PDF.js
+    const pdfScript = document.createElement("script");
+    pdfScript.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+    pdfScript.async = true;
+    document.head.appendChild(pdfScript);
+
+    // Load Firebase and set up real-time listener
+    const loadFirebase = async () => {
+      try {
+        const [{ initializeApp }, { getFirestore, collection, onSnapshot, doc, setDoc, deleteDoc }] = await Promise.all([
+          import("https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js"),
+          import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js")
+        ]);
+        const app = initializeApp(FIREBASE_CONFIG);
+        const db = getFirestore(app);
+        dbRef.current = { db, collection, doc, setDoc, deleteDoc };
+        setFbReady(true);
+
+        // Real-time listener — updates guidelines for ALL users instantly
+        const guidelinesCol = collection(db, "guidelines");
+        onSnapshot(guidelinesCol, (snapshot) => {
+          const loaded = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+          loaded.sort((a, b) => (a.addedAt || "").localeCompare(b.addedAt || ""));
+          setGuidelines(loaded);
+        });
+      } catch (err) {
+        console.error("Firebase init error:", err);
+      }
+    };
+    loadFirebase();
+
+    return () => { try { document.head.removeChild(pdfScript); } catch {} };
   }, []);
 
   const notify = (msg, type = "success") => {
@@ -275,9 +313,19 @@ export default function GastroRef() {
         const rawText = await extractPdfText(file);
         if (!rawText.trim()) throw new Error("No text could be extracted — the PDF may be scanned/image-based");
         const truncated = rawText.slice(0, 60000);
-        setGuidelines(prev => [...prev.filter(g => g.name !== file.name), { name: file.name, content: truncated, addedAt: new Date().toLocaleString() }]);
-        notify(`✓ ${file.name} loaded (${Math.round(truncated.length / 1000)}k chars)`);
-      } catch (err) { notify(`Failed: ${err.message}`, "error"); }
+        const docData = { name: file.name, content: truncated, addedAt: new Date().toISOString() };
+        if (dbRef.current) {
+          setFbSyncing(true);
+          const { db, collection, doc, setDoc } = dbRef.current;
+          const id = file.name.replace(/[^a-z0-9]/gi, "_").toLowerCase();
+          await setDoc(doc(collection(db, "guidelines"), id), docData);
+          setFbSyncing(false);
+          notify(`✓ ${file.name} saved & shared with all users`);
+        } else {
+          setGuidelines(prev => [...prev.filter(g => g.name !== file.name), docData]);
+          notify(`✓ ${file.name} loaded locally (Firebase not connected)`);
+        }
+      } catch (err) { setFbSyncing(false); notify(`Failed: ${err.message}`, "error"); }
     }
     e.target.value = "";
   };
@@ -609,7 +657,19 @@ export default function GastroRef() {
       {/* ── GUIDELINES TAB ── */}
       {tab === "guidelines" && (
         <div style={{ flex: 1, overflowY: "auto", padding: 24 }}>
-          <div style={{ fontSize: 13, color: C.textMuted, marginBottom: 16, letterSpacing: 1, textTransform: "uppercase" }}>Knowledge Base</div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+            <div style={{ fontSize: 13, color: C.textMuted, letterSpacing: 1, textTransform: "uppercase" }}>Knowledge Base</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: fbReady ? C.green : C.gold }}>
+              <div style={{ width: 6, height: 6, borderRadius: "50%", background: fbReady ? C.green : C.gold, animation: fbSyncing ? "pulse 1s infinite" : "none" }} />
+              {fbSyncing ? "Saving to cloud…" : fbReady ? "Shared · synced across all users" : "Connecting to cloud…"}
+            </div>
+          </div>
+
+          {!fbReady && (
+            <div style={{ marginBottom: 16, padding: "12px 16px", background: `${C.gold}11`, border: `1px solid ${C.gold}44`, borderRadius: 8, fontSize: 12, color: C.gold, lineHeight: 1.6 }}>
+              ⚠ Firebase not configured yet. Add your Firebase config to the code to enable shared guidelines. Until then, guidelines are local to this device only.
+            </div>
+          )}
 
           <div
             onClick={() => fileInputRef.current?.click()}
@@ -624,7 +684,8 @@ export default function GastroRef() {
           >
             <div style={{ fontSize: 36, marginBottom: 12 }}>📄</div>
             <div style={{ fontSize: 15, color: C.textSecondary, marginBottom: 6 }}>Drop PDF guidelines here or click to upload</div>
-            <div style={{ fontSize: 12, color: C.textMuted, fontFamily: "'Calibri', 'Carlito', Arial, sans-serif" }}>BSG · NICE · EASL · ECCO · ACG · ASGE · any PDF guideline</div>
+            <div style={{ fontSize: 12, color: C.textMuted }}>BSG · NICE · EASL · ECCO · ACG · ASGE · any PDF guideline</div>
+            <div style={{ fontSize: 11, color: C.textMuted, marginTop: 6 }}>{fbReady ? "Uploads are shared instantly with all users" : "Upload locally until Firebase is configured"}</div>
             <input ref={fileInputRef} type="file" accept=".pdf" multiple onChange={handleFileUpload} style={{ display: "none" }} />
           </div>
 
@@ -635,20 +696,30 @@ export default function GastroRef() {
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               {guidelines.map((g, i) => (
-                <div key={i} style={{
+                <div key={g.id || i} style={{
                   background: C.card, border: `1px solid ${C.border}`, borderRadius: 10,
                   padding: "14px 18px", display: "flex", justifyContent: "space-between", alignItems: "center"
                 }}>
                   <div>
                     <div style={{ fontSize: 14, color: C.textPrimary, fontWeight: 600, marginBottom: 3 }}>📄 {g.name}</div>
-                    <div style={{ fontSize: 11, color: C.textMuted, fontFamily: "'Calibri', 'Carlito', Arial, sans-serif" }}>
-                      Loaded {g.addedAt} · {Math.round(g.content.length / 4)} tokens
+                    <div style={{ fontSize: 11, color: C.textMuted }}>
+                      Added {g.addedAt ? new Date(g.addedAt).toLocaleString() : "—"} · {Math.round((g.content||"").length / 4)} tokens · {fbReady ? "☁ shared" : "local only"}
                     </div>
                   </div>
-                  <button onClick={() => { setGuidelines(prev => prev.filter((_, j) => j !== i)); notify("Guideline removed"); }} style={{
+                  <button onClick={async () => {
+                    if (dbRef.current && g.id) {
+                      try {
+                        const { db, collection, doc, deleteDoc } = dbRef.current;
+                        await deleteDoc(doc(collection(db, "guidelines"), g.id));
+                        notify("Guideline removed for all users");
+                      } catch { notify("Failed to remove", "error"); }
+                    } else {
+                      setGuidelines(prev => prev.filter((_, j) => j !== i));
+                      notify("Guideline removed");
+                    }
+                  }} style={{
                     background: "transparent", border: `1px solid ${C.red}44`,
-                    borderRadius: 6, padding: "5px 12px", color: C.red, fontSize: 12,
-                    fontFamily: "'Calibri', 'Carlito', Arial, sans-serif"
+                    borderRadius: 6, padding: "5px 12px", color: C.red, fontSize: 12, cursor: "pointer"
                   }}>Remove</button>
                 </div>
               ))}
@@ -657,7 +728,7 @@ export default function GastroRef() {
 
           {guidelines.length > 0 && (
             <div style={{ marginTop: 24, padding: "14px 18px", background: `${C.green}11`, border: `1px solid ${C.green}44`, borderRadius: 10, fontSize: 13, color: C.green }}>
-              ✓ {guidelines.length} guideline{guidelines.length !== 1 ? "s" : ""} active — switch to Chat or Quick Reference to query them.
+              ✓ {guidelines.length} guideline{guidelines.length !== 1 ? "s" : ""} active — {fbReady ? "shared with all users" : "local only"}
             </div>
           )}
           <div style={{ marginTop: 32, paddingTop: 20, borderTop: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
